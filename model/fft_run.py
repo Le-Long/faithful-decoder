@@ -199,7 +199,7 @@ def add_global_attention_mask(batch):
 
 logger = get_logger(__name__)
 dirname = os.path.dirname(__file__)
-DATA_DIR = os.path.expanduser('~/data_tmp')
+DATA_DIR = os.path.expanduser('../data_tmp')
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/summarization/requirements.txt")
 
 # You should update this to your particular problem to have better documentation of `model_type`
@@ -456,7 +456,7 @@ def parse_args():
         args.log_every_n_steps = 2
         if args.contrast_ckpt is not None:
             args.resume_from_checkpoint = os.path.join(args.output_dir, args.contrast_ckpt, 'best_ckpt')
-            logger.info(f'Starting contrastive fine-tuning from {args.resume_from_checkpoint}')
+            print(f'Starting contrastive fine-tuning from {args.resume_from_checkpoint}')
 
     args.output_dir = os.path.join(args.output_dir, args.experiment)
     os.makedirs(args.output_dir, exist_ok=True)
@@ -528,7 +528,7 @@ def main():
         keep_train_idxs = [i for i, uuid in enumerate(train_uuids) if uuid in train_uuid_set]
         keep_val_idxs = [i for i, uuid in enumerate(val_uuids) if uuid in val_uuid_set]
         raw_datasets['train'] = raw_datasets['train'].select(keep_train_idxs)
-        raw_datasets['validation'] = raw_datasets['validation'].select(keep_val_idxs)
+        # raw_datasets['validation'] = raw_datasets['validation'].select(keep_val_idxs) # Val data aaren't used for contrast set
 
     if args.hf_model == 't5':
         tokenizer = T5Tokenizer.from_pretrained(T5_MODEL)

@@ -49,7 +49,7 @@ def add_global_attention_mask(batch):
 
 
 dirname = os.path.dirname(__file__)
-DATA_DIR = os.path.expanduser('~/data_tmp')
+DATA_DIR = os.path.expanduser('../data_tmp')
 T5_MODEL = 'google/long-t5-tglobal-base'
 PRIMERA_MODEL = 'allenai/PRIMERA'
 
@@ -100,7 +100,7 @@ def main(args):
     except Exception as e:
         print(str(e))
         print('Probably erased. We can load the model weights directly instead')
-        fn = os.path.join(ckpt_dir, 'pytorch_model', 'mp_rank_00_model_states.pt')
+        fn = os.path.join(ckpt_dir, 'pytorch_model.bin')
         fp_weights = torch.load(fn)
         model = LEDForConditionalGeneration(config=config).half()
         model.load_state_dict(fp_weights['module'], strict=False)
@@ -204,7 +204,7 @@ if __name__ == '__main__':
     parser.add_argument('--results_name', default='results')
     parser.add_argument('--num_beams', default=1, type=int)
     parser.add_argument('--max_examples', default=10000, type=int)
-    parser.add_argument('--batch_size', default=32, type=int)
+    parser.add_argument('--batch_size', default=8, type=int)
     parser.add_argument('--device', default=0, type=int)
     parser.add_argument('--dataset')
     parser.add_argument('-overwrite', default=False, action='store_true')

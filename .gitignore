@@ -6,3 +6,5 @@ logs
 .lock
 errors
 .idea/
+data_tmp/
+primera_splits.zip

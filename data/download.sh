@@ -2,7 +2,7 @@
 set -e
 
 DATASET=$1  # "pubmed" "chemistry"
-DIR="${HOME}/data_tmp"
+DIR="../data_tmp"
 
 WEIGHT_DIR="${DIR}/weights"
 mkdir -p $WEIGHT_DIR
@@ -25,17 +25,17 @@ fi
 PRIMERA_FILE_ID=$(echo $PRIMERA_LINK | sed 's/.*d\/\([^.]*\)\/.*/\1/')
 PRIMERA_DEST="${WEIGHT_DIR}/${PRIMERA_FN}.tar.gz"
 gdown $PRIMERA_FILE_ID -O $PRIMERA_DEST
-tar -xzf $PRIMERA_DEST -C "${WEIGHT_DIR}"
+tar xf $PRIMERA_DEST -C "${WEIGHT_DIR}"
 rm $PRIMERA_DEST
 
 LONG_T5_FILE_ID=$(echo $LONG_T5_LINK | sed 's/.*d\/\([^.]*\)\/.*/\1/')
 LONG_T5_DEST="${WEIGHT_DIR}/${LONG_T5_FN}.tar.gz"
 gdown $LONG_T5_FILE_ID -O $LONG_T5_DEST
-tar -xzf $LONG_T5_DEST -C "${WEIGHT_DIR}"
+tar xf $LONG_T5_DEST -C "${WEIGHT_DIR}"
 rm $LONG_T5_DEST
 
 CORRUPTION_FILE_ID=$(echo $CORRUPTION_LINK | sed 's/.*d\/\([^.]*\)\/.*/\1/')
 DEST="${OUT_DIR}/corruptions.tar.gz"
 gdown $CORRUPTION_FILE_ID --output $DEST
-tar -xzf $DEST -C "${OUT_DIR}"
+tar xf $DEST -C "${OUT_DIR}"
 rm $DEST

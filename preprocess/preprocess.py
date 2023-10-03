@@ -12,7 +12,7 @@ from transformers import AutoTokenizer, T5Tokenizer
 
 T5_MODEL = 'google/long-t5-tglobal-base'
 PRIMERA_MODEL = 'allenai/PRIMERA'
-DATA_DIR = os.path.expanduser('~/data_tmp')
+DATA_DIR = os.path.expanduser('../data_tmp')
 PUBMED_PATH = 'ccdv/pubmed-summarization'
 
 
