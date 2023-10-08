@@ -233,7 +233,7 @@ def run_single_metric(records, bartscore_hf_model, bartscore_path, uuid2data, me
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser('Arguments to Evaluate Abstracts (real and synthetic corruptions)')
-    parser.add_argument('--data_dir', default=os.path.expanduser('~/data_tmp'))
+    parser.add_argument('--data_dir', default=os.path.expanduser('../data_tmp'))
     parser.add_argument('--dataset')
     parser.add_argument('--fp', default='weights/primera_final/results/predictions.csv')
     parser.add_argument('--mode', default='evaluate', choices=['evaluate', 'merge_chunks', 'merge_metrics', 'to_table'])

@@ -2363,6 +2363,7 @@ class LEDForConditionalGeneration(LEDPreTrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
+        early_exit_layers: Optional[List[int]] = None,
     ) -> Union[Tuple[torch.Tensor], LEDSeq2SeqLMOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -2412,32 +2413,63 @@ class LEDForConditionalGeneration(LEDPreTrainedModel):
             decoder_inputs_embeds=decoder_inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            output_hidden_states=output_hidden_states or early_exit_layers is not None,
             return_dict=return_dict,
         )
-        lm_logits = self.lm_head(outputs[0]) + self.final_logits_bias
 
-        masked_lm_loss = None
-        if labels is not None:
-            loss_fct = CrossEntropyLoss()
-            masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
+        if early_exit_layers is not None:
+            logits_dict = {}
+            # loss_dict = {}
+            for i, early_exit_layer in enumerate(early_exit_layers):
+                lm_logits = self.lm_head(outputs.decoder_hidden_states[early_exit_layer])
+                logits_dict[early_exit_layer] = lm_logits
+            
+            masked_lm_loss = None
+            if labels is not None:
+                loss_fct = CrossEntropyLoss()
+                masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
 
-        if not return_dict:
-            output = (lm_logits,) + outputs[1:]
-            return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+            if not return_dict:
+                output = (lm_logits,) + outputs[1:]
+                return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
 
-        return LEDSeq2SeqLMOutput(
-            loss=masked_lm_loss,
-            logits=lm_logits,
-            past_key_values=outputs.past_key_values,
-            decoder_hidden_states=outputs.decoder_hidden_states,
-            decoder_attentions=outputs.decoder_attentions,
-            cross_attentions=outputs.cross_attentions,
-            encoder_last_hidden_state=outputs.encoder_last_hidden_state,
-            encoder_hidden_states=outputs.encoder_hidden_states,
-            encoder_attentions=outputs.encoder_attentions,
-            encoder_global_attentions=outputs.encoder_global_attentions,
-        )
+            final_outputs = LEDSeq2SeqLMOutput(
+                loss=masked_lm_loss,
+                logits=lm_logits,
+                past_key_values=outputs.past_key_values,
+                decoder_hidden_states=outputs.decoder_hidden_states,
+                decoder_attentions=outputs.decoder_attentions,
+                cross_attentions=outputs.cross_attentions,
+                encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+                encoder_hidden_states=outputs.encoder_hidden_states,
+                encoder_attentions=outputs.encoder_attentions,
+                encoder_global_attentions=outputs.encoder_global_attentions,
+            )
+            return logits_dict, final_outputs
+        else:
+            lm_logits = self.lm_head(outputs[0]) + self.final_logits_bias
+
+            masked_lm_loss = None
+            if labels is not None:
+                loss_fct = CrossEntropyLoss()
+                masked_lm_loss = loss_fct(lm_logits.view(-1, self.config.vocab_size), labels.view(-1))
+
+            if not return_dict:
+                output = (lm_logits,) + outputs[1:]
+                return ((masked_lm_loss,) + output) if masked_lm_loss is not None else output
+
+            return LEDSeq2SeqLMOutput(
+                loss=masked_lm_loss,
+                logits=lm_logits,
+                past_key_values=outputs.past_key_values,
+                decoder_hidden_states=outputs.decoder_hidden_states,
+                decoder_attentions=outputs.decoder_attentions,
+                cross_attentions=outputs.cross_attentions,
+                encoder_last_hidden_state=outputs.encoder_last_hidden_state,
+                encoder_hidden_states=outputs.encoder_hidden_states,
+                encoder_attentions=outputs.encoder_attentions,
+                encoder_global_attentions=outputs.encoder_global_attentions,
+            )
 
     def prepare_inputs_for_generation(
         self,

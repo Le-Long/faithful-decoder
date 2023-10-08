@@ -37,7 +37,7 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
 
-
+nltk.download('punkt')
 # from model.utils import add_global_attention_mask
 
 
@@ -151,10 +151,14 @@ def main(args):
     gen_kwargs = {
         'max_length': args.max_length,
         'num_beams': args.num_beams, 'no_repeat_ngram_size': 3, 'early_stopping': True,
-        'length_penalty': args.length_penalty
+        'length_penalty': args.length_penalty,# "num_return_sequences": 10,
+        # 'do_sample': True, 'top_k': 0, 'top_p': 0.95
+        # 'mature_layer': 6, 'base_layer': 1, 'dola_decoding': True
+        # 'candidate_premature_layers': ()
     }
 
     outputs = []
+    beam_outputs = []
     data_idx = 0
     for batch in tqdm(dataloader, total=len(dataloader)):
         if args.hf_model == 'primera':
@@ -166,6 +170,7 @@ def main(args):
                 attention_mask=batch['attention_mask'].to(args.device),
                 **gen_kwargs,
             ).cpu().numpy()
+            # generated_tokens = [generated_outputs[0],]
 
             labels = batch['labels'].numpy()
             labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
@@ -176,6 +181,12 @@ def main(args):
             prepared_preds = postprocess_text(decoded_preds)
             references = postprocess_text(decoded_labels)
 
+            # Save a file for all candidates each sample
+            # beam_idx = data_idx
+            # for generated_candidates in generated_outputs:
+            #     clean_candidate = tokenizer.batch_decode(generated_candidates, skip_special_tokens=True)
+            #     beam_outputs.append({'prediction': clean_candidate, 'abstract': decoded_labels[0], 'uuid': uuids[data_idx]})
+            
             for clean_prediction, clean_label, prediction, reference in zip(decoded_preds, decoded_labels, prepared_preds, references):
                 output_row = {'prediction': clean_prediction, 'abstract': clean_label, 'uuid': uuids[data_idx]}
                 output_row.update(compute_rouge(metric, reference=reference, prediction=prediction))
@@ -186,6 +197,9 @@ def main(args):
     outputs = pd.DataFrame(outputs)
     print(f'Saving {len(outputs)} outputs to {out_fn}')
     outputs.to_csv(out_fn, index=False)
+    # beam_outputs = pd.DataFrame(beam_outputs)
+    # candidates_fn = os.path.join(args.output_dir, f'{args.split}_candidates.csv')
+    # beam_outputs.to_csv(candidates_fn, index=False)
 
     rouge_cols = ['rouge1', 'rouge2', 'rougeL']
     for col in rouge_cols:
