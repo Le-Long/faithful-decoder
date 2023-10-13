@@ -165,11 +165,17 @@ def main(args):
             add_global_attention_mask(batch)
             gen_kwargs['global_attention_mask'] = batch['global_attention_mask'].to(args.device)
         with torch.no_grad(), torch.cuda.amp.autocast() if args.hf_model == 'primera' else torch.no_grad():
-            generated_tokens = model.generate(
+            generated_outputs = model.generate(
                 batch['input_ids'].to(args.device),
                 attention_mask=batch['attention_mask'].to(args.device),
+                output_hidden_states=True,
+                return_dict_in_generate=True,
                 **gen_kwargs,
-            ).cpu().numpy()
+            )  
+            beam_outputs = list(torch.flatten(token_state[-1]) for token_state in generated_outputs.decoder_hidden_states)
+            # print(torch.quantile(torch.cat(beam_outputs), 0.95, interpolation='midpoint'))
+            # print(torch.quantile(torch.cat(beam_outputs), 0.99, interpolation='midpoint'))
+            generated_tokens = generated_outputs.sequences.cpu().numpy()
             # generated_tokens = [generated_outputs[0],]
 
             labels = batch['labels'].numpy()

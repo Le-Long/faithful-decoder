@@ -2279,7 +2279,7 @@ class LEDModel(LEDPreTrainedModel):
             return decoder_outputs + encoder_outputs
 
         return LEDSeq2SeqModelOutput(
-            last_hidden_state=decoder_outputs.last_hidden_state,
+            last_hidden_state=torch.clamp(decoder_outputs.last_hidden_state, max=2.1), # 1.2
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,
