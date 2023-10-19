@@ -108,7 +108,7 @@ def main(args):
 
     model.resize_token_embeddings(len(tokenizer))
     print(f'Loading custom dataset from {data_path}')
-    predict_dataset = load_from_disk(data_path)[args.split]
+    predict_dataset = load_from_disk(data_path)[args.split].select(range(100))
     uuids = predict_dataset['uuid']
 
     dataset_cols = list(predict_dataset.features.keys())
@@ -151,9 +151,9 @@ def main(args):
     gen_kwargs = {
         'max_length': args.max_length,
         'num_beams': args.num_beams, 'no_repeat_ngram_size': 3, 'early_stopping': True,
-        'length_penalty': args.length_penalty,# "num_return_sequences": 10,
+        'length_penalty': args.length_penalty, # "num_return_sequences": 5,
         # 'do_sample': True, 'top_k': 0, 'top_p': 0.95
-        # 'mature_layer': 6, 'base_layer': 1, 'dola_decoding': True
+        # 'mature_layer': 12, 'base_layer': 6, 'dola_decoding': True
         # 'candidate_premature_layers': ()
     }
 
@@ -168,15 +168,16 @@ def main(args):
             generated_outputs = model.generate(
                 batch['input_ids'].to(args.device),
                 attention_mask=batch['attention_mask'].to(args.device),
-                output_hidden_states=True,
-                return_dict_in_generate=True,
+                # output_hidden_states=True,
+                # return_dict_in_generate=True,
                 **gen_kwargs,
             )  
-            beam_outputs = list(torch.flatten(token_state[-1]) for token_state in generated_outputs.decoder_hidden_states)
+            
+            # beam_outputs = list(torch.flatten(token_state[-1]) for token_state in generated_outputs.decoder_hidden_states)
             # print(torch.quantile(torch.cat(beam_outputs), 0.95, interpolation='midpoint'))
             # print(torch.quantile(torch.cat(beam_outputs), 0.99, interpolation='midpoint'))
-            generated_tokens = generated_outputs.sequences.cpu().numpy()
-            # generated_tokens = [generated_outputs[0],]
+            generated_tokens = generated_outputs.cpu().numpy()
+            # generated_tokens = [generated_outputs[i] for i in range(0, len(generated_outputs), gen_kwargs["num_return_sequences"])]
 
             labels = batch['labels'].numpy()
             labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
@@ -188,10 +189,19 @@ def main(args):
             references = postprocess_text(decoded_labels)
 
             # Save a file for all candidates each sample
-            # beam_idx = data_idx
-            # for generated_candidates in generated_outputs:
-            #     clean_candidate = tokenizer.batch_decode(generated_candidates, skip_special_tokens=True)
-            #     beam_outputs.append({'prediction': clean_candidate, 'abstract': decoded_labels[0], 'uuid': uuids[data_idx]})
+            # beam_idx = 0
+            # clean_candidates = postprocess_text(tokenizer.batch_decode(generated_outputs, skip_special_tokens=True))
+            # beam_candidates = []
+
+            # for i in range(len(clean_candidates)):
+            #     clean_candidate = clean_candidates[i]
+            #     beam_row = {'prediction': clean_candidate, 'abstract': decoded_labels[beam_idx], 'uuid': uuids[beam_idx]}
+            #     beam_row.update(compute_rouge(metric, reference=references[beam_idx], prediction=clean_candidate))
+            #     beam_candidates.append(beam_row)
+            #     if i % gen_kwargs["num_return_sequences"] == gen_kwargs["num_return_sequences"] - 1:
+            #         beam_outputs.append(max(beam_candidates, key=lambda x:(x['rouge1'] + x['rouge2'] + x['rougeL'])/3))
+            #         beam_candidates = []
+            #         beam_idx += 1
             
             for clean_prediction, clean_label, prediction, reference in zip(decoded_preds, decoded_labels, prepared_preds, references):
                 output_row = {'prediction': clean_prediction, 'abstract': clean_label, 'uuid': uuids[data_idx]}
@@ -200,12 +210,13 @@ def main(args):
                 outputs.append(output_row)
                 data_idx += 1
 
+
     outputs = pd.DataFrame(outputs)
     print(f'Saving {len(outputs)} outputs to {out_fn}')
-    outputs.to_csv(out_fn, index=False)
+    outputs.to_csv(out_fn, mode='a', index=False)
     # beam_outputs = pd.DataFrame(beam_outputs)
     # candidates_fn = os.path.join(args.output_dir, f'{args.split}_candidates.csv')
-    # beam_outputs.to_csv(candidates_fn, index=False)
+    # beam_outputs.to_csv(candidates_fn, mode='a', index=False)
 
     rouge_cols = ['rouge1', 'rouge2', 'rougeL']
     for col in rouge_cols:

@@ -1726,22 +1726,18 @@ class GenerationMixin:
             if lm_weight != 0:
                 # compute lm prob to calculate mmi prob later
                 lm_inputs = self.prepare_inputs_for_generation(lm_ids, **model_kwargs)
-                lm_logits = self(
+                lm_score = self(
                     **lm_inputs,
                     return_dict=True
                 ).logits[:, -1, :]
-                lm_score = logits_processor(lm_ids, lm_logits)
+                # lm_score = logits_processor(lm_ids, lm_logits)
                 # calulate entropy of next tokens
-                ent = -(next_tokens_scores*torch.exp(next_tokens_scores)).sum(-1)
-                high_ents = ent > 3.6
+                next_tokens_probs = nn.functional.softmax(next_tokens_scores, dim=-1)
+                ent = torch.nan_to_num(-(next_tokens_probs*torch.log(next_tokens_probs)).sum(-1).nan_to_num())
+                high_ents = (ent > 3.5)
                 weights = lm_weight * high_ents
                 lm_score = lm_score * weights.unsqueeze(1)
-                mmi_prob = next_tokens_scores + lm_score
-
-
-                # Normalize the probabilities
-                Z = torch.logsumexp(mmi_prob, -1)
-                next_tokens_scores = mmi_prob - Z.unsqueeze(1)
+                next_tokens_scores = next_tokens_scores + lm_score
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
@@ -2022,7 +2018,7 @@ class GenerationMixin:
                 base_logits = dict_outputs[base_layer][:, -1, :]
                 final_logits = dict_outputs[mature_layer][:, -1, :]
                 if relative_top > 0.0:
-                    final_logits = self.relative_top_filter(final_logits, relative_top)
+                    # final_logits = self.relative_top_filter(final_logits, relative_top)
                     base_logits = base_logits.log_softmax(dim=-1)
                     mask = final_logits[0] < -1e3
                     base_logits[0][mask] = -1e3

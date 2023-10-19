@@ -2279,7 +2279,7 @@ class LEDModel(LEDPreTrainedModel):
             return decoder_outputs + encoder_outputs
 
         return LEDSeq2SeqModelOutput(
-            last_hidden_state=torch.clamp(decoder_outputs.last_hidden_state, max=2.1), # 1.2
+            last_hidden_state=torch.clamp(decoder_outputs.last_hidden_state, max=4.84), # 1.2
             past_key_values=decoder_outputs.past_key_values,
             decoder_hidden_states=decoder_outputs.hidden_states,
             decoder_attentions=decoder_outputs.attentions,
@@ -2413,7 +2413,7 @@ class LEDForConditionalGeneration(LEDPreTrainedModel):
             decoder_inputs_embeds=decoder_inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states or early_exit_layers is not None,
+            output_hidden_states=output_hidden_states or (early_exit_layers is not None),
             return_dict=return_dict,
         )
 
@@ -2421,7 +2421,7 @@ class LEDForConditionalGeneration(LEDPreTrainedModel):
             logits_dict = {}
             # loss_dict = {}
             for i, early_exit_layer in enumerate(early_exit_layers):
-                lm_logits = self.lm_head(outputs.decoder_hidden_states[early_exit_layer])
+                lm_logits = self.lm_head(outputs.decoder_hidden_states[early_exit_layer]) + self.final_logits_bias
                 logits_dict[early_exit_layer] = lm_logits
             
             masked_lm_loss = None
