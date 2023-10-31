@@ -20,7 +20,9 @@ Fine-tuning the library models for sequence to sequence.
 
 import argparse
 import os
+import time
 
+from evaluate import load
 from datasets import load_from_disk, load_metric
 import nltk  # Here to have a nice missing dependency error message early on
 import numpy as np
@@ -32,10 +34,12 @@ from transformers import (
     T5Tokenizer,
     LongT5ForConditionalGeneration,
     LEDForConditionalGeneration,
+    AdamW
 )
 from tqdm import tqdm
 import torch
 from torch.utils.data import DataLoader
+from bert_score import BERTScorer
 
 nltk.download('punkt')
 # from model.utils import add_global_attention_mask
@@ -58,6 +62,69 @@ def compute_rouge(metric, reference, prediction):
     result = metric.compute(references=[reference], predictions=[prediction], use_stemmer=True)
     result = {key: value.mid.fmeasure * 100 for key, value in result.items()}
     return result
+
+
+def train(model, dataloader, tokenizer, gen_kwargs, args):
+    batch_size = args.batch_size
+    discriminator = BERTScorer(
+        batch_size=batch_size,
+        device=args.device,
+        model_type='allenai/scibert_scivocab_uncased',
+        use_fast_tokenizer=True, lang='en'
+    )
+    model.init_discriminator(discriminator) 
+    stored_sentences = []
+
+    for batch in tqdm(dataloader, total=len(dataloader)):
+        if args.hf_model == 'primera':
+            add_global_attention_mask(batch)
+            gen_kwargs['global_attention_mask'] = batch['global_attention_mask'].to(args.device)
+
+        model.set_biases(batch_size, seq_len + batch['input_ids'].shape[1], 'non_toxic', 0.7)
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if "biases" in n or "trainable_weights" in n],
+                "weight_decay": args.weight_decay,
+            }
+        ]
+        optimizer = AdamW(optimizer_grouped_parameters, lr=args.learning_rate)
+        model.eval()
+        minimun_loss = [100000] * batch_size
+        stored_sentence = [""] * batch_size
+        start_time = time.time()
+        for i in range(args.num_train_epochs):
+            if all([loss < 0.0003 for loss in minimun_loss]):
+                break
+            if i % 1 == 0:
+                loss, output_ids, gpt_logit, senti_losses = model.soft_forward(
+                    batch['input_ids'].to(args.device),
+                    attention_mask=batch['attention_mask'].to(args.device),
+                    **gen_kwargs,)
+                print("Decoding: ", loss)
+                sentences = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+                print(sentences)
+            loss.backward()
+            if i % 1 == 0:
+                optimizer.step()
+                noise = [torch.normal(mean=0.01, std=0.01, size=model.biases[0].shape,
+                                     device=args.device, requires_grad=False) for _ in range(len(model.biases))]
+                for i in range(len(model.biases)):
+                    model.biases[i].data = model.biases[i].data + noise[i]
+            if i % 1 == 0:
+                print(f"loss: {loss}")
+                for idx in range(batch_size):
+                    print(f"loss {idx}: senti loss: {senti_losses[idx]}")
+                    if senti_losses[idx] < minimun_loss[idx]:
+                        print(f"update minimun loss{idx}")
+                        minimun_loss[idx] = senti_losses[idx]
+                        stored_sentence[idx] = sentences[idx]
+            
+        end_time = time.time()
+        print("minimun loss: ", minimun_loss)
+        print("time: ", end_time - start_time)
+    
+    stored_sentences.append(stored_sentence)
+    return stored_sentences
 
 
 def main(args):
@@ -108,7 +175,7 @@ def main(args):
 
     model.resize_token_embeddings(len(tokenizer))
     print(f'Loading custom dataset from {data_path}')
-    predict_dataset = load_from_disk(data_path)[args.split].select(range(100))
+    predict_dataset = load_from_disk(data_path)[args.split]
     uuids = predict_dataset['uuid']
 
     dataset_cols = list(predict_dataset.features.keys())
@@ -150,65 +217,70 @@ def main(args):
 
     gen_kwargs = {
         'max_length': args.max_length,
-        'num_beams': args.num_beams, 'no_repeat_ngram_size': 3, 'early_stopping': True,
-        'length_penalty': args.length_penalty, # "num_return_sequences": 5,
+        # 'num_beams': args.num_beams, 'no_repeat_ngram_size': 3, 'early_stopping': True,
+        # 'length_penalty': args.length_penalty, # "num_return_sequences": 5,
         # 'do_sample': True, 'top_k': 0, 'top_p': 0.95
         # 'mature_layer': 12, 'base_layer': 6, 'dola_decoding': True
         # 'candidate_premature_layers': ()
     }
 
-    outputs = []
-    beam_outputs = []
-    data_idx = 0
-    for batch in tqdm(dataloader, total=len(dataloader)):
-        if args.hf_model == 'primera':
-            add_global_attention_mask(batch)
-            gen_kwargs['global_attention_mask'] = batch['global_attention_mask'].to(args.device)
-        with torch.no_grad(), torch.cuda.amp.autocast() if args.hf_model == 'primera' else torch.no_grad():
-            generated_outputs = model.generate(
-                batch['input_ids'].to(args.device),
-                attention_mask=batch['attention_mask'].to(args.device),
-                # output_hidden_states=True,
-                # return_dict_in_generate=True,
-                **gen_kwargs,
-            )  
+    if args.optimization:
+        # Optimize outputs with data-dependent biases
+        outputs = train(model, dataloader, tokenizer, gen_kwargs, args)
+    else:
+
+        outputs = []
+        beam_outputs = []
+        data_idx = 0
+        for batch in tqdm(dataloader, total=len(dataloader)):
+            if args.hf_model == 'primera':
+                add_global_attention_mask(batch)
+                gen_kwargs['global_attention_mask'] = batch['global_attention_mask'].to(args.device)
+            with torch.no_grad(), torch.cuda.amp.autocast() if args.hf_model == 'primera' else torch.no_grad():
+                generated_outputs = model.generate(
+                    batch['input_ids'].to(args.device),
+                    attention_mask=batch['attention_mask'].to(args.device),
+                    # output_hidden_states=True,
+                    # return_dict_in_generate=True,
+                    **gen_kwargs,
+                )  
+                
+                # beam_outputs = list(torch.flatten(token_state[-1]) for token_state in generated_outputs.decoder_hidden_states)
+                # print(torch.quantile(torch.cat(beam_outputs), 0.95, interpolation='midpoint'))
+                # print(torch.quantile(torch.cat(beam_outputs), 0.99, interpolation='midpoint'))
+                generated_tokens = generated_outputs.cpu().numpy()
+                # generated_tokens = [generated_outputs[i] for i in range(0, len(generated_outputs), gen_kwargs["num_return_sequences"])]
+
+                labels = batch['labels'].numpy()
+                labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
             
-            # beam_outputs = list(torch.flatten(token_state[-1]) for token_state in generated_outputs.decoder_hidden_states)
-            # print(torch.quantile(torch.cat(beam_outputs), 0.95, interpolation='midpoint'))
-            # print(torch.quantile(torch.cat(beam_outputs), 0.99, interpolation='midpoint'))
-            generated_tokens = generated_outputs.cpu().numpy()
-            # generated_tokens = [generated_outputs[i] for i in range(0, len(generated_outputs), gen_kwargs["num_return_sequences"])]
+                decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
+                decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
-            labels = batch['labels'].numpy()
-            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        
-            decoded_preds = tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)
-            decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+                prepared_preds = postprocess_text(decoded_preds)
+                references = postprocess_text(decoded_labels)
 
-            prepared_preds = postprocess_text(decoded_preds)
-            references = postprocess_text(decoded_labels)
+                # Save a file for all candidates each sample
+                # beam_idx = 0
+                # clean_candidates = postprocess_text(tokenizer.batch_decode(generated_outputs, skip_special_tokens=True))
+                # beam_candidates = []
 
-            # Save a file for all candidates each sample
-            # beam_idx = 0
-            # clean_candidates = postprocess_text(tokenizer.batch_decode(generated_outputs, skip_special_tokens=True))
-            # beam_candidates = []
+                # for i in range(len(clean_candidates)):
+                #     clean_candidate = clean_candidates[i]
+                #     beam_row = {'prediction': clean_candidate, 'abstract': decoded_labels[beam_idx], 'uuid': uuids[beam_idx]}
+                #     beam_row.update(compute_rouge(metric, reference=references[beam_idx], prediction=clean_candidate))
+                #     beam_candidates.append(beam_row)
+                #     if i % gen_kwargs["num_return_sequences"] == gen_kwargs["num_return_sequences"] - 1:
+                #         beam_outputs.append(max(beam_candidates, key=lambda x:(x['rouge1'] + x['rouge2'] + x['rougeL'])/3))
+                #         beam_candidates = []
+                #         beam_idx += 1
+                
+                for clean_prediction, clean_label, prediction, reference in zip(decoded_preds, decoded_labels, prepared_preds, references):
+                    output_row = {'prediction': clean_prediction, 'abstract': clean_label, 'uuid': uuids[data_idx]}
+                    output_row.update(compute_rouge(metric, reference=reference, prediction=prediction))
 
-            # for i in range(len(clean_candidates)):
-            #     clean_candidate = clean_candidates[i]
-            #     beam_row = {'prediction': clean_candidate, 'abstract': decoded_labels[beam_idx], 'uuid': uuids[beam_idx]}
-            #     beam_row.update(compute_rouge(metric, reference=references[beam_idx], prediction=clean_candidate))
-            #     beam_candidates.append(beam_row)
-            #     if i % gen_kwargs["num_return_sequences"] == gen_kwargs["num_return_sequences"] - 1:
-            #         beam_outputs.append(max(beam_candidates, key=lambda x:(x['rouge1'] + x['rouge2'] + x['rougeL'])/3))
-            #         beam_candidates = []
-            #         beam_idx += 1
-            
-            for clean_prediction, clean_label, prediction, reference in zip(decoded_preds, decoded_labels, prepared_preds, references):
-                output_row = {'prediction': clean_prediction, 'abstract': clean_label, 'uuid': uuids[data_idx]}
-                output_row.update(compute_rouge(metric, reference=reference, prediction=prediction))
-
-                outputs.append(output_row)
-                data_idx += 1
+                    outputs.append(output_row)
+                    data_idx += 1
 
 
     outputs = pd.DataFrame(outputs)
@@ -243,6 +315,10 @@ if __name__ == '__main__':
     parser.add_argument('--split', default='test')
     parser.add_argument('--max_length', default=1024, type=int)
     parser.add_argument('--length_penalty', default=1.0, type=float)
+    parser.add_argument('--weight_decay', default=0.01, type=float)
+    parser.add_argument('--learning_rate', default=0.025, type=float)
+    parser.add_argument('--num_train_epochs', default=8, type=int)
+    parser.add_argument('--optimization', default=False, action='store_true')
 
     args = parser.parse_args()
 
