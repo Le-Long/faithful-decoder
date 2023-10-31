@@ -2366,9 +2366,9 @@ class BiasedModelMixin:
     ):
         if senti_label is not None:
             if type(senti_label) == int:
-                self.labels = torch.LongTensor([senti_label]).cuda()
+                self.labels = torch.LongTensor([senti_label]).half().cuda()
             else:
-                self.labels = torch.LongTensor(senti_label).cuda()
+                self.labels = torch.LongTensor(senti_label).half().cuda()
 
         if not inference:
             output_ids, onehot_generates, last_score, soft_generates, logits, gpt_logit = self.soft_greedy_search_with_biases(inputs_embeds, input_ids, pad_token_id=self.config.eos_token_id, return_last_score=True, biases=self.biases, use_hidden_states_biases=True, return_logit=True, trainable_weights=self.trainable_weights, **kwargs)
@@ -2377,10 +2377,10 @@ class BiasedModelMixin:
 
         # Hard-coded for BertScore, need to change later
         print('compute bertscore')
-        senti_losses = self.discriminator.compute(predictions=output_ids, references=input_ids, lang='en')['f1']
+        _ , _ , senti_losses = self.discriminator.score(output_ids, input_ids)
         senti_loss = 1 - torch.mean(senti_losses)
 
-        lm_embs = torch.matmul(onehot_generates, self.get_input_embeddings().weight)
+        lm_embs = torch.matmul(onehot_generates.half(), self.get_input_embeddings().weight)
         ppl_loss = self(inputs_embeds=lm_embs, labels=output_ids).loss
         labels = torch.argmax(onehot_generates, dim=-1)
         loss = 1 * senti_loss + 0.1 * ppl_loss
