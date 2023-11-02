@@ -2362,6 +2362,7 @@ class BiasedModelMixin:
         inference=False,
         use_full_prompt=False,
         senti_label=None,
+        tokenizer=None
         **kwargs
     ):
         if senti_label is not None:
@@ -2377,7 +2378,9 @@ class BiasedModelMixin:
 
         # Hard-coded for BertScore, need to change later
         print('compute bertscore')
-        _ , _ , senti_losses = self.discriminator.score(output_ids, input_ids)
+        hyps = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
+        refs = tokenizer.batch_decode(input_ids, skip_special_tokens=True)
+        _ , _ , senti_losses = self.discriminator.score(hyps, refs)
         senti_loss = 1 - torch.mean(senti_losses)
 
         lm_embs = torch.matmul(onehot_generates.half(), self.get_input_embeddings().weight)

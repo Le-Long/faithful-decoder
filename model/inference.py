@@ -99,6 +99,7 @@ def train(model, dataloader, tokenizer, gen_kwargs, args):
                 loss, output_ids, gpt_logit, senti_losses = model.soft_forward(
                     batch['input_ids'].to(args.device),
                     attention_mask=batch['attention_mask'].to(args.device),
+                    tokenizer=tokenizer,
                     **gen_kwargs,)
                 print("Decoding: ", loss)
                 sentences = tokenizer.batch_decode(output_ids, skip_special_tokens=True)
