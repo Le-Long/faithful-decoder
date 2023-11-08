@@ -2274,6 +2274,12 @@ class LEDModel(LEDPreTrainedModel):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
+        
+        # features = decoder_outputs.last_hidden_state.detach().clone()
+        # decoder_outputs.hidden_states = list(decoder_outputs.hidden_states)
+        # decoder_outputs.hidden_states[12] = torch.clamp(decoder_outputs.hidden_states[12], max=2.1)
+        # decoder_outputs.hidden_states = tuple(decoder_outputs.hidden_states)
+        # assert  torch.equal(features, decoder_outputs.last_hidden_state)
     
         if not return_dict:
             return decoder_outputs + encoder_outputs
@@ -2413,7 +2419,7 @@ class PragmaticModelMixin:
 
         return world_priors
 
-    def pragmatic_reasoning(self, log_score, worldprior):
+    def pragmatic_reasoning(self, base_score, worldprior, s0_t):
         """
         run pragmatic reasoning with the base speaker and its imaginary listener
         """
@@ -2421,18 +2427,19 @@ class PragmaticModelMixin:
         vocab_size = self.led.shared.num_embeddings
 
         # log-scale
-        #log_score = nn.functional.log_softmax(s0_t, dim=1)
-        #log_score = log_score.squeeze()  # (bpsz, vocab)
+        log_score = nn.functional.log_softmax(base_score, dim=1)
+        log_score = log_score.squeeze()  # (bpsz, vocab)
 
         # (bsz, world_cardinality, vocab)
         log_score = log_score.view(self.world_cardinality, -1, vocab_size).transpose(0, 1)
+        s0_t = s0_t.view(self.world_cardinality, -1, vocab_size).transpose(0, 1)
 
         # S_0 for L_1
         _literal_speaker = log_score.clone()
         _literal_speaker, _literal_s_next_token_idxs = torch.max(_literal_speaker, dim=-1, keepdim=True)
 
         # S_0 for the actual given persona (bsz, vocab)
-        speaker_prior = log_score.select(1, self.target_persona)  # target persona is always index 0
+        speaker_prior = s0_t.select(1, self.target_persona)  # target persona is always index 0
 
         # S_0 for L_0
         # (bsz, vocab, world_cardinality)
@@ -2454,13 +2461,13 @@ class PragmaticModelMixin:
         speaker_posterior = speaker_posterior.unsqueeze(1)  # (bsz, 1, vocab)
 
         # L_0 for L_1, uncomment when used L_1
-        _literal_listener = listener_posterior.transpose(dim0=1, dim1=2).contiguous()
-        _literal_listener = torch.gather(_literal_listener, -1, _literal_s_next_token_idxs)
+        # _literal_listener = listener_posterior.transpose(dim0=1, dim1=2).contiguous()
+        # _literal_listener = torch.gather(_literal_listener, -1, _literal_s_next_token_idxs)
 
-        pragmatic_listener = (_literal_speaker + _literal_listener) - torch.logsumexp(_literal_speaker + _literal_listener, 1, keepdim=True)
-        pragmatic_listener = pragmatic_listener.squeeze()
+        # pragmatic_listener = (_literal_speaker + _literal_listener) - torch.logsumexp(_literal_speaker + _literal_listener, 1, keepdim=True)
+        # pragmatic_listener = pragmatic_listener.squeeze()
 
-        return speaker_posterior, listener_posterior , pragmatic_listener
+        return speaker_posterior, listener_posterior
 
 
 @add_start_docstrings(

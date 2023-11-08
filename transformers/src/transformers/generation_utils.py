@@ -1311,6 +1311,7 @@ class GenerationMixin:
             # 11. run greedy search
             return self.greedy_search(
                 input_ids,
+                max_length=max_length,
                 logits_processor=logits_processor,
                 stopping_criteria=stopping_criteria,
                 pad_token_id=pad_token_id,
@@ -1318,6 +1319,7 @@ class GenerationMixin:
                 output_scores=output_scores,
                 return_dict_in_generate=return_dict_in_generate,
                 synced_gpus=synced_gpus,
+                candidate_premature_layers=candidate_premature_layers,
                 **model_kwargs,
             )
 
@@ -1385,6 +1387,7 @@ class GenerationMixin:
                 output_scores=output_scores,
                 return_dict_in_generate=return_dict_in_generate,
                 synced_gpus=synced_gpus,
+                candidate_premature_layers=candidate_premature_layers,
                 **model_kwargs,
             )
 
@@ -1568,6 +1571,7 @@ class GenerationMixin:
         synced_gpus: Optional[bool] = False,
         lm_weight: Optional[int] = 0,
         priors: Optional[torch.LongTensor] = None,
+        candidate_premature_layers: Optional[List[int]] = None,
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
         r"""
@@ -1708,11 +1712,12 @@ class GenerationMixin:
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
             # forward pass to get next token
-            outputs = self(
+            premature_logits, outputs = self(
                 **model_inputs,
                 return_dict=True,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
+                early_exit_layers=candidate_premature_layers,
             )
             
             if synced_gpus and this_peer_finished:
@@ -1768,22 +1773,19 @@ class GenerationMixin:
                 worldprior_t = priors.select(1, t).unsqueeze(1)
 
                 # only get the last timestep's logit
-                s0_t = next_tokens_scores  # logits shape: (bpsz, vocab)
-                print(s0_t.shape)
+                s0_t = nn.functional.log_softmax(logits_processor(input_ids, premature_logits[12][:, -1, :]), dim=1)  # logits shape: (bpsz, vocab)
 
                 # s1_t: (bsz, 1, vocab)
                 # listener_posterior: (bsz, vocab, world_cardinality)
-                s1_t, l0_t = self.pragmatic_reasoning(next_tokens_scores, worldprior_t)
-                s1_scores.append(s1_t)
+                s1_t, l0_t = self.pragmatic_reasoning(next_tokens_scores, worldprior_t, s0_t)
 
                 next_token = s1_t.max(2)[1].clone().detach()  # next input is current predicted output idx
 
-                idx_for_tile = torch.arange(bsz).repeat(self.world_cardinality, 1).transpose(0, 1).reshape(-1).cuda()
-                next_tokens = torch.index_select(next_token, 0, idx_for_tile)
-                next_token = next_token.unsqueeze(2)
-                tiled_next_token = next_token.repeat(1, 1, self.world_cardinality)
+                idx_for_tile = torch.arange(int(next_tokens_scores.shape[0]/self.world_cardinality)).repeat(self.world_cardinality).cuda()
+                next_tokens = torch.index_select(next_token, 0, idx_for_tile).squeeze()
+                tiled_next_token = next_token.unsqueeze(2).repeat(1, 1, self.world_cardinality)
                 
-                if t + 1 < maxlen:
+                if t + 1 < max_length:
                     # (bsz, vocab, world_cardinality) -> (bsz, 1, world_cardinality)
                     updated_world_prior = torch.gather(l0_t, 1, tiled_next_token).clone().detach()
                     priors[:, t + 1, :] = updated_world_prior.squeeze()
@@ -2781,6 +2783,8 @@ class GenerationMixin:
         output_scores: Optional[bool] = None,
         return_dict_in_generate: Optional[bool] = None,
         synced_gpus: Optional[bool] = False,
+        priors: Optional[torch.LongTensor] = None,
+        candidate_premature_layers: Optional[List[int]] = None,
         **model_kwargs,
     ) -> Union[BeamSearchOutput, torch.LongTensor]:
         r"""
@@ -2950,11 +2954,12 @@ class GenerationMixin:
 
             model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
 
-            outputs = self(
+            premature_logits, outputs = self(
                 **model_inputs,
                 return_dict=True,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
+                early_exit_layers=candidate_premature_layers,
             )
 
             if synced_gpus and this_peer_finished:
@@ -2970,7 +2975,48 @@ class GenerationMixin:
             )  # (batch_size * num_beams, vocab_size)
 
             next_token_scores_processed = logits_processor(input_ids, next_token_scores)
-            next_token_scores = next_token_scores_processed + beam_scores[:, None].expand_as(next_token_scores)
+            next_token_scores = next_token_scores_processed + beam_scores[:, None].expand_as(next_token_scores)            
+
+            if priors is not None:
+                t = cur_len - input_ids.shape[-1]
+                worldprior_t = priors.select(1, t).unsqueeze(1)
+
+                # only get the last timestep's logit
+                s0_t = nn.functional.log_softmax(logits_processor(input_ids, premature_logits[12][:, -1, :]), dim=1)  # logits shape: (bpsz, vocab)
+
+                # s1_t: (bsz, 1, vocab)
+                # listener_posterior: (bsz, vocab, world_cardinality)
+                s1_t, l0_t, l1_t = self.pragmatic_reasoning(next_token_scores, worldprior_t, s0_t)
+
+                # reshape for beam search
+                vocab_size = s1_t.shape[-1]
+                s1_t = s1_t.view(-1, 1, num_beams * vocab_size)
+
+                s1_t, next_token = torch.topk(
+                    s1_t, 2 * num_beams, dim=-1, largest=True, sorted=True
+                )
+                #next_token = s1_t.max(2)[1].clone().detach()  # next input is current predicted output idx
+
+                idx_for_tile = torch.arange(next_token.shape[0]).repeat(self.world_cardinality).cuda()
+                next_tokens = torch.index_select(next_token, 0, idx_for_tile).squeeze()
+                next_token_scores = torch.index_select(s1_t, 0, idx_for_tile).squeeze()
+
+                next_indices = torch_int_div(next_tokens, vocab_size)
+                next_tokens = next_tokens % vocab_size
+                
+            
+            else:
+
+                # reshape for beam search
+                vocab_size = next_token_scores.shape[-1]
+                next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
+
+                next_token_scores, next_tokens = torch.topk(
+                    next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
+                )
+
+                next_indices = torch_int_div(next_tokens, vocab_size)
+                next_tokens = next_tokens % vocab_size
 
             # Store scores, attentions and hidden_states when required
             if return_dict_in_generate:
@@ -2990,17 +3036,6 @@ class GenerationMixin:
                         else (outputs.hidden_states,)
                     )
 
-            # reshape for beam search
-            vocab_size = next_token_scores.shape[-1]
-            next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
-
-            next_token_scores, next_tokens = torch.topk(
-                next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
-            )
-
-            next_indices = torch_int_div(next_tokens, vocab_size)
-            next_tokens = next_tokens % vocab_size
-
             # stateless
             beam_outputs = beam_scorer.process(
                 input_ids,
@@ -3015,6 +3050,12 @@ class GenerationMixin:
             beam_scores = beam_outputs["next_beam_scores"]
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
+
+            if priors is not None and t + 1 < 1024:
+                tiled_next_token = beam_next_tokens[:int(beam_next_tokens.shape[0]/self.world_cardinality)].unsqueeze(1).unsqueeze(2).repeat(1, 1, self.world_cardinality)
+                # (bsz, vocab, world_cardinality) -> (bsz, 1, world_cardinality)
+                updated_world_prior = torch.gather(l0_t, 1, tiled_next_token).clone().detach()
+                priors[:, t + 1, :] = updated_world_prior.squeeze()
 
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
 

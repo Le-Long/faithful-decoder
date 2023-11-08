@@ -186,7 +186,7 @@ def main(args):
         predict_dataset = predict_dataset.select(range(args.max_examples))
 
     # If pragmatic model used
-    priors = model.initialize_worldpriors(args.batch_size, args.max_length, 1)
+    priors = model.initialize_worldpriors(args.batch_size*args.num_beams, args.max_length, 1)
         
 
     # Data collator
