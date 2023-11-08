@@ -2362,7 +2362,7 @@ class BiasedModelMixin:
         inference=False,
         use_full_prompt=False,
         senti_label=None,
-        tokenizer=None
+        tokenizer=None,
         **kwargs
     ):
         if senti_label is not None:
@@ -2393,66 +2393,80 @@ class BiasedModelMixin:
 
         return loss, output_ids, gpt_logit, senti_losses
 
-    def soft_forward_without_decoding(
-        self,
-        input_ids=None,
-        past_key_values=None,
-        attention_mask=None,
-        token_type_ids=None,
-        position_ids=None,
-        head_mask=None,
-        inputs_embeds=None,
-        encoder_hidden_states=None,
-        encoder_attention_mask=None,
-        labels=None,
-        use_cache=None,
-        output_attentions=None,
-        output_hidden_states=None,
-        return_dict=None,
-        inference=False,
-        use_full_prompt=False,
-        senti_label=None,
-        gpt_logit=None
-    ):
-        if senti_label is not None:
-            if type(senti_label) == int:
-                self.labels = torch.LongTensor([senti_label]).cuda()
-            else:
-                self.labels = torch.LongTensor(senti_label).cuda()
-        for i in range(gpt_logit.size(1)):
-            if i < input_ids.size(1):
-                continue
-            weight = 1 * (100 - i) / 100
-            gpt_logit[:, i, :] = (gpt_logit[:, i, :] + weight * self.lm_head(self.biases[i])) / (1 + weight)
-        
-        output_ids = torch.argmax(gpt_logit, dim=-1)
-        cur_sampled_next_token_soft = torch.nn.functional.softmax(gpt_logit, dim=-1)
-        cur_sampled_next_token_onehot = torch.nn.functional.one_hot(output_ids, num_classes=self.config.vocab_size).float().to(input_ids.device)
-        cur_sampled_next_token = cur_sampled_next_token_onehot - cur_sampled_next_token_soft.detach() + cur_sampled_next_token_soft
-        onehot_generates = cur_sampled_next_token
 
-        dis_embs = torch.matmul(onehot_generates, self.discriminator.get_input_embeddings().weight)
-        senti_loss = self.discriminator(inputs_embeds=dis_embs, labels=self.labels.repeat(dis_embs.shape[0])).loss
+class PragmaticModelMixin:
+    def initialize_worldpriors(self, bsz, seqlen, alpha):
+        """
+        initialize hyperparameters and the world prior with a uniform distribution
+        """
+        self.alpha = alpha
+        self.beta = 1
+        self.world_cardinality = 2
+        self.target_persona = 0
+        self.fp16 = True
 
-        lm_embs = torch.matmul(onehot_generates, self.get_input_embeddings().weight)
-        ppl_loss = self(inputs_embeds=lm_embs, labels=output_ids).loss
+        cardinality = self.world_cardinality
+        torch_dtype=torch.half if self.fp16 else torch.float
+        ones = torch.ones(1, seqlen, cardinality, dtype=torch_dtype, requires_grad=False).cuda()
+        uniform_world_prior = torch.log(ones / cardinality)
+        world_priors = uniform_world_prior.repeat(bsz, 1, 1).detach()
 
-        sim_lm_embs = torch.tril(torch.matmul(lm_embs, lm_embs.transpose(1, 2)), diagonal=-1)
-        if self.sim_count is None:
-            self.sim_count = torch.tril(torch.ones(sim_lm_embs.shape), diagonal=-1).cuda()
-        sim_loss = torch.sum(sim_lm_embs * self.sim_count) / torch.sum(self.sim_count)
-        loss = 1 * senti_loss + 5 * ppl_loss + 0 * sim_loss
+        return world_priors
 
-        print("senti_loss:", senti_loss)
-        print("ppl_loss:", ppl_loss)
-        print("sim_loss:", sim_loss)
-        return loss, output_ids
+    def pragmatic_reasoning(self, log_score, worldprior):
+        """
+        run pragmatic reasoning with the base speaker and its imaginary listener
+        """
+
+        vocab_size = self.led.shared.num_embeddings
+
+        # log-scale
+        #log_score = nn.functional.log_softmax(s0_t, dim=1)
+        #log_score = log_score.squeeze()  # (bpsz, vocab)
+
+        # (bsz, world_cardinality, vocab)
+        log_score = log_score.view(self.world_cardinality, -1, vocab_size).transpose(0, 1)
+
+        # S_0 for L_1
+        _literal_speaker = log_score.clone()
+        _literal_speaker, _literal_s_next_token_idxs = torch.max(_literal_speaker, dim=-1, keepdim=True)
+
+        # S_0 for the actual given persona (bsz, vocab)
+        speaker_prior = log_score.select(1, self.target_persona)  # target persona is always index 0
+
+        # S_0 for L_0
+        # (bsz, vocab, world_cardinality)
+        log_score = log_score.transpose(dim0=1, dim1=2).contiguous()
+        log_score = log_score * self.beta
+
+        # L_0 \propto S_0 * p(i)
+        # worldprior should be broadcasted to all the tokens
+        # (bsz, vocab, world_cardinality)
+        listener_posterior = (log_score + worldprior) - torch.logsumexp(log_score + worldprior, 2, keepdim=True)
+
+        # (bsz, vocab)
+        listener_score = listener_posterior.select(2, self.target_persona)  # target persona is always index 0
+        listener_score = torch.nan_to_num(listener_score * self.alpha)
+
+        speaker_posterior = (listener_score + speaker_prior) - torch.logsumexp(listener_score + speaker_prior, 1, keepdim=True)
+
+        # need to unsqueeze in the dimension 1
+        speaker_posterior = speaker_posterior.unsqueeze(1)  # (bsz, 1, vocab)
+
+        # L_0 for L_1, uncomment when used L_1
+        _literal_listener = listener_posterior.transpose(dim0=1, dim1=2).contiguous()
+        _literal_listener = torch.gather(_literal_listener, -1, _literal_s_next_token_idxs)
+
+        pragmatic_listener = (_literal_speaker + _literal_listener) - torch.logsumexp(_literal_speaker + _literal_listener, 1, keepdim=True)
+        pragmatic_listener = pragmatic_listener.squeeze()
+
+        return speaker_posterior, listener_posterior , pragmatic_listener
 
 
 @add_start_docstrings(
     "The LED Model with a language modeling head. Can be used for summarization.", LED_START_DOCSTRING
 )
-class LEDForConditionalGeneration(LEDPreTrainedModel, BiasedModelMixin):
+class LEDForConditionalGeneration(LEDPreTrainedModel, PragmaticModelMixin):
     base_model_prefix = "led"
     _keys_to_ignore_on_load_missing = [
         r"final_logits_bias",

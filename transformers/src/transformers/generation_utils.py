@@ -512,7 +512,7 @@ class GenerationMixin:
         encoder = self.get_encoder()
 
         # 2. prepare encoder args and encoder kwargs from model kwargs
-        irrelevant_prefix = ["decoder_", "cross_attn", "use_cache", "lm_weight"]
+        irrelevant_prefix = ["decoder_", "cross_attn", "use_cache", "lm_weight", "priors"]
         encoder_kwargs = {
             argument: value
             for argument, value in model_kwargs.items()
@@ -1567,6 +1567,7 @@ class GenerationMixin:
         return_dict_in_generate: Optional[bool] = None,
         synced_gpus: Optional[bool] = False,
         lm_weight: Optional[int] = 0,
+        priors: Optional[torch.LongTensor] = None,
         **model_kwargs,
     ) -> Union[GreedySearchOutput, torch.LongTensor]:
         r"""
@@ -1762,6 +1763,31 @@ class GenerationMixin:
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
 
+            if priors is not None:
+                t = cur_len - input_ids.shape[-1]
+                worldprior_t = priors.select(1, t).unsqueeze(1)
+
+                # only get the last timestep's logit
+                s0_t = next_tokens_scores  # logits shape: (bpsz, vocab)
+                print(s0_t.shape)
+
+                # s1_t: (bsz, 1, vocab)
+                # listener_posterior: (bsz, vocab, world_cardinality)
+                s1_t, l0_t = self.pragmatic_reasoning(next_tokens_scores, worldprior_t)
+                s1_scores.append(s1_t)
+
+                next_token = s1_t.max(2)[1].clone().detach()  # next input is current predicted output idx
+
+                idx_for_tile = torch.arange(bsz).repeat(self.world_cardinality, 1).transpose(0, 1).reshape(-1).cuda()
+                next_tokens = torch.index_select(next_token, 0, idx_for_tile)
+                next_token = next_token.unsqueeze(2)
+                tiled_next_token = next_token.repeat(1, 1, self.world_cardinality)
+                
+                if t + 1 < maxlen:
+                    # (bsz, vocab, world_cardinality) -> (bsz, 1, world_cardinality)
+                    updated_world_prior = torch.gather(l0_t, 1, tiled_next_token).clone().detach()
+                    priors[:, t + 1, :] = updated_world_prior.squeeze()
+
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
                 if pad_token_id is None:
@@ -1770,7 +1796,7 @@ class GenerationMixin:
 
             # update generated ids, model inputs, and length for next step
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-            lm_ids = torch.cat([lm_ids, next_tokens[:, None]], dim=-1)
+            # lm_ids = torch.cat([lm_ids, next_tokens[:, None]], dim=-1)
 
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder

@@ -64,7 +64,7 @@ def compute_rouge(metric, reference, prediction):
     return result
 
 
-def train(model, dataloader, tokenizer, gen_kwargs, args):
+def train_optimizer(model, dataloader, tokenizer, gen_kwargs, args):
     batch_size = args.batch_size
     discriminator = BERTScorer(
         batch_size=batch_size,
@@ -185,6 +185,10 @@ def main(args):
     if args.max_examples is not None and args.max_examples < len(predict_dataset):
         predict_dataset = predict_dataset.select(range(args.max_examples))
 
+    # If pragmatic model used
+    priors = model.initialize_worldpriors(args.batch_size, args.max_length, 1)
+        
+
     # Data collator
     if is_t5:
         pad_multiple = None
@@ -218,25 +222,34 @@ def main(args):
 
     gen_kwargs = {
         'max_length': args.max_length,
-        # 'num_beams': args.num_beams, 'no_repeat_ngram_size': 3, 'early_stopping': True,
-        # 'length_penalty': args.length_penalty, # "num_return_sequences": 5,
+        'num_beams': args.num_beams, 'no_repeat_ngram_size': 3, 'early_stopping': True,
+        'length_penalty': args.length_penalty, # "num_return_sequences": 5,
         # 'do_sample': True, 'top_k': 0, 'top_p': 0.95
         # 'mature_layer': 12, 'base_layer': 6, 'dola_decoding': True
-        # 'candidate_premature_layers': ()
+        'candidate_premature_layers': [12],
+        'priors': priors,
     }
 
     if args.optimization:
         # Optimize outputs with data-dependent biases
-        outputs = train(model, dataloader, tokenizer, gen_kwargs, args)
+        outputs = train_optimizer(model, dataloader, tokenizer, gen_kwargs, args)
     else:
 
         outputs = []
         beam_outputs = []
         data_idx = 0
         for batch in tqdm(dataloader, total=len(dataloader)):
+            if 'priors' in gen_kwargs.keys():
+                sz_1 = batch['input_ids'].shape[0]
+                sz_2 = args.max_length if args.max_length < batch['input_ids'].shape[1] else (batch['input_ids'].shape[1]/2)
+                batch['input_ids'] = batch['input_ids'].repeat(model.world_cardinality, 1)
+                batch['attention_mask'] = batch['attention_mask'].repeat(model.world_cardinality, 1)
+                batch['attention_mask'][sz_1:, :sz_2] = 0
+
             if args.hf_model == 'primera':
                 add_global_attention_mask(batch)
                 gen_kwargs['global_attention_mask'] = batch['global_attention_mask'].to(args.device)
+            
             with torch.no_grad(), torch.cuda.amp.autocast() if args.hf_model == 'primera' else torch.no_grad():
                 generated_outputs = model.generate(
                     batch['input_ids'].to(args.device),
@@ -249,7 +262,7 @@ def main(args):
                 # beam_outputs = list(torch.flatten(token_state[-1]) for token_state in generated_outputs.decoder_hidden_states)
                 # print(torch.quantile(torch.cat(beam_outputs), 0.95, interpolation='midpoint'))
                 # print(torch.quantile(torch.cat(beam_outputs), 0.99, interpolation='midpoint'))
-                generated_tokens = generated_outputs.cpu().numpy()
+                generated_tokens = generated_outputs[:sz_1].cpu().numpy()
                 # generated_tokens = [generated_outputs[i] for i in range(0, len(generated_outputs), gen_kwargs["num_return_sequences"])]
 
                 labels = batch['labels'].numpy()
